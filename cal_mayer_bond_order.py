@@ -1,8 +1,8 @@
 """
 Calculate Mayer bond order for gamma-only calculations of ABACUS using LCAO basis.
 """
+import os
 import numpy as np
-from abacustest.lib_prepare.abacus import ReadInput
 
 def read_overlap_matrix(ovlp_mat_file):
     """
@@ -61,7 +61,7 @@ def read_density_matrix(rho_mat_file):
 
     return dm_mat
 
-def cal_mayer_bond_order(ovlp_mat, dm, iorb_atom1, iorb_atom2):
+def cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2):
     """
     Calculate Mayer bond order between two atoms.
     """
@@ -73,22 +73,36 @@ def cal_mayer_bond_order(ovlp_mat, dm, iorb_atom1, iorb_atom2):
     
     return mayer_bond_order
 
-if __name__ == '__main__':
-    abacusjob_dir = "./"
-    print(f"Calculate Mayer bond order for {abacusjob_dir}")
-    # TODO: finish implementation
+def cal_mayer_bond_order(abacusjob_dir):
+    """
+    Calculate Mayer bond order from ABACUS calculation output.
+    """
+    from pathlib import Path
+    from abacustest.lib_prepare.abacus import ReadInput
+    from abacustest.lib_prepare.stru import AbacusSTRU
 
-    H2_abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/H2_out_mat_hs"
-    H2_ovlp_mat_file = f"{H2_abacusjob_dir}/OUT.ABACUS/data-0-S"
-    H2_ovlp_mat = read_overlap_matrix(H2_ovlp_mat_file)
-    print("H2 overlap matrix:", H2_ovlp_mat)
+    input_params = ReadInput(os.path.join(Path(abacusjob_dir).absolute(), "INPUT"))
 
-    dm_file = f"{H2_abacusjob_dir}/OUT.ABACUS/SPIN1_DM"
+    assert input_params.get('nspin', 1) == 1 # Only support spin-unpolarized calculation now
+    assert input_params.get('gamma_only', 1) == 1 # Only support gamma-only calculation
+    assert input_params.get('out_mat_hs', 1) == 1
+    assert input_params.get('out_dm', 1) == 1
+
+    suffix = input_params.get('suffix', 'ABACUS')
+    ovlp_mat_file = f"{abacusjob_dir}/OUT.{suffix}/data-0-S"
+    dm_file = f"{abacusjob_dir}/OUT.{suffix}/SPIN1_DM"
+
+    ovlp_mat = read_overlap_matrix(ovlp_mat_file)
     dm = read_density_matrix(dm_file)
-    print("H2 density matrix:", dm)
 
     iorb_atom1 = [i for i in range(5)]
     iorb_atom2 = [i for i in range(5, 10)]
-    mayer_bond_order = cal_mayer_bond_order(H2_ovlp_mat, dm, iorb_atom1, iorb_atom2)
-    print("Mayer bond order:", mayer_bond_order)
+
+    mayer_bond_order = cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2)
+    print(f"Mayer bond order: {mayer_bond_order}")
+
+if __name__ == '__main__':
+    abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/H2_out_mat_hs"
+    print(f"Calculate Mayer bond order for {abacusjob_dir}")
+    cal_mayer_bond_order(abacusjob_dir)
 
