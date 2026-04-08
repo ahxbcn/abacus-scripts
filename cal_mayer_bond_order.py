@@ -32,6 +32,56 @@ class AbacusNAO:
             return self._dynamic_fields[name]
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
+def read_nao_file(nao_file):
+    
+    with open(nao_file) as f:
+        nao_file_content = f.readlines()
+
+    summary_end_line = 0
+    for linenum, line in enumerate(nao_file_content):
+        if 'SUMMARY  END' in line:
+            summary_end_line = linenum
+            break
+    
+    summary = nao_file_content[1:summary_end_line-1]
+    element = summary[0].split()[-1]
+    energy_cutoff = float(summary[1].split()[-1])
+    radius = float(summary[2].split()[-1])
+    Lmax = int(summary[3].split()[-1])
+    n_l_orbs = []
+    for idx, line in enumerate(summary[4:]):
+        n_l_orbs.append(int(line.split()[-1]))
+
+    mesh = int(nao_file_content[summary_end_line+2].split()[-1])
+    dr = float(nao_file_content[summary_end_line+3].split()[-1])
+    
+    orb_data_start_lines = []
+    for linenum, line in enumerate(nao_file_content[summary_end_line+4:]):
+        if 'Type' in line and 'L' in line and 'N' in line:
+            orb_data_start_lines.append(linenum+summary_end_line+4)
+
+    orbs = []
+    for orb_idx, orb_data_start_line in enumerate(orb_data_start_lines):
+        _, l, n = nao_file_content[orb_data_start_line+1].split()
+        l, n = int(l), int(n)
+        if orb_idx == len(orb_data_start_lines) - 1:
+            orb_data_original = nao_file_content[orb_data_start_line+2:]
+        else:
+            orb_data_original = nao_file_content[orb_data_start_line+2:orb_data_start_lines[orb_idx+1]]
+
+        orb_data = []
+        for data_line in orb_data_original:
+            data = data_line.split()
+            for num in data:
+                orb_data.append(float(num))
+
+        orbs.append({'l': l, 'n': n, 'orb_data': np.array(orb_data)})
+
+
+    nao = AbacusNAO(element, energy_cutoff, radius, Lmax, n_l_orbs, orbs, mesh, dr)
+
+    return nao
+
 
 def read_overlap_matrix(ovlp_mat_file):
     """
