@@ -4,6 +4,7 @@ Calculate Mayer bond order for gamma-only calculations of ABACUS using LCAO basi
 import os
 from dataclasses import dataclass, field, fields
 from typing import Dict, Any, List
+import argparse
 
 import numpy as np
 
@@ -179,7 +180,6 @@ def cal_mayer_bond_order(abacusjob_dir):
     input_params = ReadInput(os.path.join(Path(abacusjob_dir).absolute(), "INPUT"))
     nspin = input_params.get('nspin', 1)
 
-    #assert input_params.get('nspin', 1) == 1 # Only support spin-unpolarized calculation now
     assert input_params.get('gamma_only', 1) == 1 # Only support gamma-only calculation
     assert input_params.get('out_mat_hs', 1) == 1
     assert input_params.get('out_dm', 1) == 1
@@ -219,10 +219,15 @@ def cal_mayer_bond_order(abacusjob_dir):
 
             mayer_bond_order = cal_mayer_bond_order_between_atom_pair(iorb_atom1, iorb_atom2, ovlp_mat, dm, dm_dn)
             atomtype1, atomtype2 = stru.atoms[i].label, stru.atoms[j].label
-            print(f"{atomtype1}{i} - {atomtype2}{j}: {mayer_bond_order}")
+            if mayer_bond_order > 0.2:
+                print(f"{atomtype1}{i+1} - {atomtype2}{j+1}: {mayer_bond_order}")
 
 if __name__ == '__main__':
-    abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/O2_out_mat_hs"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", "--abacusjob_dir", type=str, default="./", help="ABACUS job directory to calculate Mayer bond order")
+    args = parser.parse_args()
+
+    abacusjob_dir = args.abacusjob_dir
     print(f"Calculate Mayer bond order for {abacusjob_dir}")
     cal_mayer_bond_order(abacusjob_dir)
 
