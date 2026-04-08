@@ -147,15 +147,23 @@ def read_density_matrix(rho_mat_file):
 
     return dm_mat
 
-def cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2):
+def cal_mayer_bond_order_between_atom_pair(iorb_atom1, iorb_atom2, ovlp_mat, dm, dm_dn=None):
     """
     Calculate Mayer bond order between two atoms.
     """
-    PS = dm @ ovlp_mat
     mayer_bond_order = 0
-    for iorb in iorb_atom1:
-        for jorb in iorb_atom2:
-            mayer_bond_order += PS[iorb, jorb] * PS[jorb, iorb]
+    if dm_dn is None: # nspin = 1 case
+        PS = dm @ ovlp_mat
+        for iorb in iorb_atom1:
+            for jorb in iorb_atom2:
+                mayer_bond_order += PS[iorb, jorb] * PS[jorb, iorb]
+    else: # nspin = 2 case
+        PS = dm @ ovlp_mat
+        PS_dn = dm_dn @ ovlp_mat
+        for iorb in iorb_atom1:
+            for jorb in iorb_atom2:
+                mayer_bond_order += PS[iorb, jorb] * PS[jorb, iorb] + PS_dn[iorb, jorb] * PS_dn[jorb, iorb]
+        mayer_bond_order *= 2
     
     return mayer_bond_order
 
@@ -169,18 +177,23 @@ def cal_mayer_bond_order(abacusjob_dir):
     from abacustest.lib_prepare.stru import AbacusSTRU
 
     input_params = ReadInput(os.path.join(Path(abacusjob_dir).absolute(), "INPUT"))
+    nspin = input_params.get('nspin', 1)
 
-    assert input_params.get('nspin', 1) == 1 # Only support spin-unpolarized calculation now
+    #assert input_params.get('nspin', 1) == 1 # Only support spin-unpolarized calculation now
     assert input_params.get('gamma_only', 1) == 1 # Only support gamma-only calculation
     assert input_params.get('out_mat_hs', 1) == 1
     assert input_params.get('out_dm', 1) == 1
 
     suffix = input_params.get('suffix', 'ABACUS')
     ovlp_mat_file = f"{abacusjob_dir}/OUT.{suffix}/data-0-S"
-    dm_file = f"{abacusjob_dir}/OUT.{suffix}/SPIN1_DM"
-
     ovlp_mat = read_overlap_matrix(ovlp_mat_file)
+    dm_file = f"{abacusjob_dir}/OUT.{suffix}/SPIN1_DM"
     dm = read_density_matrix(dm_file)
+    if nspin == 2:
+        dm_dn_file = f"{abacusjob_dir}/OUT.{suffix}/SPIN2_DM"
+        dm_dn = read_density_matrix(dm_dn_file)
+    else:
+        dm_dn = None
 
     stru_file = os.path.join(Path(abacusjob_dir).absolute(), input_params.get('stru_file', 'STRU'))
     stru = AbacusSTRU.read(stru_file)
@@ -204,12 +217,12 @@ def cal_mayer_bond_order(abacusjob_dir):
             iorb_atom1 = [iorb for iorb in range(sum(atom_basis_nums[:i]), sum(atom_basis_nums[:i+1]))]
             iorb_atom2 = [iorb for iorb in range(sum(atom_basis_nums[:j]), sum(atom_basis_nums[:j+1]))]
 
-            mayer_bond_order = cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2)
+            mayer_bond_order = cal_mayer_bond_order_between_atom_pair(iorb_atom1, iorb_atom2, ovlp_mat, dm, dm_dn)
             atomtype1, atomtype2 = stru.atoms[i].label, stru.atoms[j].label
             print(f"{atomtype1}{i} - {atomtype2}{j}: {mayer_bond_order}")
 
 if __name__ == '__main__':
-    abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/H2_out_mat_hs"
+    abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/O2_out_mat_hs"
     print(f"Calculate Mayer bond order for {abacusjob_dir}")
     cal_mayer_bond_order(abacusjob_dir)
 
