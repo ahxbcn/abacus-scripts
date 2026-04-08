@@ -2,7 +2,36 @@
 Calculate Mayer bond order for gamma-only calculations of ABACUS using LCAO basis.
 """
 import os
+from dataclasses import dataclass, field, fields
+from typing import Dict, Any, List
+
 import numpy as np
+
+
+@dataclass
+class AbacusNAO:
+    element: str
+    energy_cutoff: float
+    radius: float
+    Lmax: int
+    l_orbs: Dict[str, int]
+    orbs: List[Dict[str, int | np.ndarray]]
+    mesh: np.ndarray
+    dr: float
+    _dynamic_fields: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        fixed_fields = {f.name for f in fields(self)}
+        if name in fixed_fields:
+            super().__setattr__(name, value)
+        else:
+            self._dynamic_fields[name] = value
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._dynamic_fields:
+            return self._dynamic_fields[name]
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
 
 def read_overlap_matrix(ovlp_mat_file):
     """
