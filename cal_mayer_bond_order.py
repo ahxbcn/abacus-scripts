@@ -82,6 +82,15 @@ def read_nao_file(nao_file):
 
     return nao
 
+def get_nao_basis_num(nao):
+    """
+    Get number of basis functions for a given NAO.
+    """
+    nbas = 0
+    for i, norb in enumerate(nao.l_orbs):
+        nbas += (i*2+1) * norb # Use 5D 7F basis
+    
+    return nbas
 
 def read_overlap_matrix(ovlp_mat_file):
     """
@@ -120,8 +129,6 @@ def read_density_matrix(rho_mat_file):
     
     empty_lines_idx = [i for i, line in enumerate(lines) if not line.strip()]
 
-    print(empty_lines_idx)
-
     dim_line = empty_lines_idx[-1] - 1
     dims = [int(s) for s in lines[dim_line].split()]
     
@@ -156,6 +163,7 @@ def cal_mayer_bond_order(abacusjob_dir):
     """
     Calculate Mayer bond order from ABACUS calculation output.
     """
+    from pprint import pprint
     from pathlib import Path
     from abacustest.lib_prepare.abacus import ReadInput
     from abacustest.lib_prepare.stru import AbacusSTRU
@@ -174,11 +182,31 @@ def cal_mayer_bond_order(abacusjob_dir):
     ovlp_mat = read_overlap_matrix(ovlp_mat_file)
     dm = read_density_matrix(dm_file)
 
-    iorb_atom1 = [i for i in range(5)]
-    iorb_atom2 = [i for i in range(5, 10)]
+    stru_file = os.path.join(Path(abacusjob_dir).absolute(), input_params.get('stru_file', 'STRU'))
+    stru = AbacusSTRU.read(stru_file)
+    # Read NAOs for each atoms
+    naos = {}
+    orb_dir = input_params.get('orbital_dir', './')
+    for atom in stru.atoms:
+        atom_nao = atom.orb
+        if atom_nao not in naos.keys():
+            nao_file = os.path.join(orb_dir, atom_nao)
+            nao = read_nao_file(nao_file)
+            naos[atom_nao] = nao
+    
+    atom_basis_nums = []
+    for atom in stru.atoms:
+        atom_basis_nums.append(get_nao_basis_num(naos[atom.orb]))
 
-    mayer_bond_order = cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2)
-    print(f"Mayer bond order: {mayer_bond_order}")
+    print("Mayer Bond Order:")
+    for i in range(stru.natoms):
+        for j in range(i+1, stru.natoms):
+            iorb_atom1 = [iorb for iorb in range(sum(atom_basis_nums[:i]), sum(atom_basis_nums[:i+1]))]
+            iorb_atom2 = [iorb for iorb in range(sum(atom_basis_nums[:j]), sum(atom_basis_nums[:j+1]))]
+
+            mayer_bond_order = cal_mayer_bond_order_between_atom_pair(ovlp_mat, dm, iorb_atom1, iorb_atom2)
+            atomtype1, atomtype2 = stru.atoms[i].label, stru.atoms[j].label
+            print(f"{atomtype1}{i} - {atomtype2}{j}: {mayer_bond_order}")
 
 if __name__ == '__main__':
     abacusjob_dir = "/mnt/e/profsoftfiles/abacusfiles/sp/H2_out_mat_hs"
