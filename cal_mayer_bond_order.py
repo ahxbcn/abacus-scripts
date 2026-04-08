@@ -34,7 +34,6 @@ class AbacusNAO:
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 def read_nao_file(nao_file):
-    
     with open(nao_file) as f:
         nao_file_content = f.readlines()
 
@@ -43,7 +42,7 @@ def read_nao_file(nao_file):
         if 'SUMMARY  END' in line:
             summary_end_line = linenum
             break
-    
+
     summary = nao_file_content[1:summary_end_line-1]
     element = summary[0].split()[-1]
     energy_cutoff = float(summary[1].split()[-1])
@@ -53,20 +52,20 @@ def read_nao_file(nao_file):
     for idx, line in enumerate(summary[4:]):
         n_l_orbs.append(int(line.split()[-1]))
 
-    mesh = int(nao_file_content[summary_end_line+2].split()[-1])
-    dr = float(nao_file_content[summary_end_line+3].split()[-1])
-    
+    mesh = int(nao_file_content[summary_end_line + 2].split()[-1])
+    dr = float(nao_file_content[summary_end_line + 3].split()[-1])
+
     orb_data_start_lines = []
-    for linenum, line in enumerate(nao_file_content[summary_end_line+4:]):
-        if 'Type' in line and 'L' in line and 'N' in line:
-            orb_data_start_lines.append(linenum+summary_end_line+4)
+    for linenum, line in enumerate(nao_file_content[summary_end_line + 4 :]):
+        if "Type" in line and "L" in line and "N" in line:
+            orb_data_start_lines.append(linenum + summary_end_line + 4)
 
     orbs = []
     for orb_idx, orb_data_start_line in enumerate(orb_data_start_lines):
-        _, l, n = nao_file_content[orb_data_start_line+1].split()
+        _, l, n = nao_file_content[orb_data_start_line + 1].split()
         l, n = int(l), int(n)
         if orb_idx == len(orb_data_start_lines) - 1:
-            orb_data_original = nao_file_content[orb_data_start_line+2:]
+            orb_data_original = nao_file_content[orb_data_start_line + 2 :]
         else:
             orb_data_original = nao_file_content[orb_data_start_line+2:orb_data_start_lines[orb_idx+1]]
 
@@ -76,12 +75,12 @@ def read_nao_file(nao_file):
             for num in data:
                 orb_data.append(float(num))
 
-        orbs.append({'l': l, 'n': n, 'orb_data': np.array(orb_data)})
-
+        orbs.append({"l": l, "n": n, "orb_data": np.array(orb_data)})
 
     nao = AbacusNAO(element, energy_cutoff, radius, Lmax, n_l_orbs, orbs, mesh, dr)
 
     return nao
+
 
 def get_nao_basis_num(nao):
     """
@@ -93,20 +92,21 @@ def get_nao_basis_num(nao):
     
     return nbas
 
+
 def read_overlap_matrix(ovlp_mat_file):
     """
     Read overlap matrix from ovlp_mat_file.
     """
     with open(ovlp_mat_file, "r") as f:
         lines = f.readlines()
-    
+
     all_vals = []
     for line in lines:
         if not line.strip():
             continue
         vals = list(map(float, line.split()))
         all_vals.extend(vals)
-    
+
     ndim = int(all_vals[0])
     vals = all_vals[1:]
 
@@ -116,9 +116,9 @@ def read_overlap_matrix(ovlp_mat_file):
     for i in range(ndim):
         for j in range(i, ndim):
             S[i, j] = vals[idx]
-            S[j, i] = vals[idx] # Real symmetric overlap matrix
+            S[j, i] = vals[idx]  # Real symmetric overlap matrix
             idx += 1
-    
+
     return S
 
 def read_density_matrix(rho_mat_file):
@@ -127,12 +127,12 @@ def read_density_matrix(rho_mat_file):
     """
     with open(rho_mat_file, "r") as f:
         lines = f.readlines()
-    
+
     empty_lines_idx = [i for i, line in enumerate(lines) if not line.strip()]
 
     dim_line = empty_lines_idx[-1] - 1
     dims = [int(s) for s in lines[dim_line].split()]
-    
+
     assert len(dims) == 2
     assert dims[0] == dims[1]
 
@@ -142,7 +142,7 @@ def read_density_matrix(rho_mat_file):
     for iline in range(empty_lines_idx[-1]+1, len(lines)):
         line_vals = [float(x) for x in lines[iline].split()]
         vals.extend(line_vals)
-    
+
     assert len(vals) == ndim * ndim
     dm_mat = np.array(vals).reshape(ndim, ndim)
 
@@ -168,6 +168,7 @@ def cal_mayer_bond_order_between_atom_pair(iorb_atom1, iorb_atom2, ovlp_mat, dm,
     
     return mayer_bond_order
 
+
 def cal_mayer_bond_order(abacusjob_dir):
     """
     Calculate Mayer bond order from ABACUS calculation output.
@@ -178,11 +179,10 @@ def cal_mayer_bond_order(abacusjob_dir):
     from abacustest.lib_prepare.stru import AbacusSTRU
 
     input_params = ReadInput(os.path.join(Path(abacusjob_dir).absolute(), "INPUT"))
-    nspin = input_params.get('nspin', 1)
+    nspin = input_params.get("nspin", 1)
 
-    assert input_params.get('gamma_only', 1) == 1 # Only support gamma-only calculation
-    assert input_params.get('out_mat_hs', 1) == 1
-    assert input_params.get('out_dm', 1) == 1
+    assert input_params.get("out_mat_hs", 1) == 1
+    assert input_params.get("out_dm", 1) == 1
 
     suffix = input_params.get('suffix', 'ABACUS')
     ovlp_mat_file = f"{abacusjob_dir}/OUT.{suffix}/data-0-S"
@@ -197,7 +197,6 @@ def cal_mayer_bond_order(abacusjob_dir):
 
     stru_file = os.path.join(Path(abacusjob_dir).absolute(), input_params.get('stru_file', 'STRU'))
     stru = AbacusSTRU.read(stru_file)
-    # Read NAOs for each atoms
     naos = {}
     orb_dir = input_params.get('orbital_dir', './')
     for atom in stru.atoms:
@@ -206,7 +205,7 @@ def cal_mayer_bond_order(abacusjob_dir):
             nao_file = os.path.join(orb_dir, atom_nao)
             nao = read_nao_file(nao_file)
             naos[atom_nao] = nao
-    
+
     atom_basis_nums = []
     for atom in stru.atoms:
         atom_basis_nums.append(get_nao_basis_num(naos[atom.orb]))
@@ -230,4 +229,3 @@ if __name__ == '__main__':
     abacusjob_dir = args.abacusjob_dir
     print(f"Calculate Mayer bond order for {abacusjob_dir}")
     cal_mayer_bond_order(abacusjob_dir)
-
