@@ -61,6 +61,18 @@ def read_density_matrix(rho_mat_file):
 
     return dm_mat
 
+def cal_mayer_bond_order(ovlp_mat, dm, iorb_atom1, iorb_atom2):
+    """
+    Calculate Mayer bond order between two atoms.
+    """
+    PS = dm @ ovlp_mat
+    mayer_bond_order = 0
+    for iorb in iorb_atom1:
+        for jorb in iorb_atom2:
+            mayer_bond_order += PS[iorb, jorb] * PS[jorb, iorb]
+    
+    return mayer_bond_order
+
 if __name__ == '__main__':
     abacusjob_dir = "./"
     print(f"Calculate Mayer bond order for {abacusjob_dir}")
@@ -74,3 +86,9 @@ if __name__ == '__main__':
     dm_file = f"{H2_abacusjob_dir}/OUT.ABACUS/SPIN1_DM"
     dm = read_density_matrix(dm_file)
     print("H2 density matrix:", dm)
+
+    iorb_atom1 = [i for i in range(5)]
+    iorb_atom2 = [i for i in range(5, 10)]
+    mayer_bond_order = cal_mayer_bond_order(H2_ovlp_mat, dm, iorb_atom1, iorb_atom2)
+    print("Mayer bond order:", mayer_bond_order)
+
