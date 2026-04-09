@@ -226,12 +226,81 @@ def cal_mayer_bond_order(abacusjob_dir):
             if mayer_bond_order > 0.2:
                 print(f"{atomtype1}{i+1} - {atomtype2}{j+1}: {mayer_bond_order}")
 
-if __name__ == '__main__':
+
+def read_wfc_nao_k(file_path):
+    """
+    Read txt format wavefunction file WFC_NAO_K*.txt
+    """
+    with open(file_path, "r") as f:
+        lines = [line.strip() for line in f.readlines()]
+
+    nbands = None
+    nlocal = None
+    kvec_c = None
+
+    for line in lines:
+        if line.endswith("(number of bands)"):
+            nbands = int(line.split()[0])
+        elif line.endswith("(number of orbitals)"):
+            nlocal = int(line.split()[0])
+        elif not line.endswith(")") and line.count(" ") == 2:
+            kvec_c = np.array([float(x) for x in line.split()])
+
+    wfc = np.zeros((nlocal, nbands), dtype=np.complex128)
+    wg = np.zeros(nbands)
+
+    ib = 0
+    ilocal = 0
+    reading_band = False
+
+    for line in lines:
+        if line.endswith("(band)"):
+            ib = int(line.split()[0]) - 1
+            ilocal = 0
+            reading_band = True
+            continue
+        elif line.endswith("(Ry)"):
+            continue
+        elif line.endswith("(Occupations)"):
+            wg[ib] = float(line.split()[0])
+            continue
+        elif reading_band and not line.endswith(")"):
+            # Read wavefunction coefficients
+            if line.count(" ") >= 1:
+                nums = line.split()
+                # Complex stored in: real1 imag1 real2 imag2 ...
+                c = [complex(float(nums[i]), float(nums[i + 1])) for i in range(0, len(nums), 2)]
+                for i in range(len(c)):
+                    if ilocal < nlocal:
+                        wfc[ilocal, ib] = c[i]
+                        ilocal += 1
+
+    return wfc, wg, kvec_c, nbands, nlocal
+
+
+def calculate_density_matrix_k(wfc, wg):
+    """
+    Calculate density matrix from wave function in LCAO basis.
+    """
+    wfc_weighted = wfc * np.sqrt(wg)[np.newaxis, :]
+    dm = wfc_weighted @ wfc_weighted.conj().T
+
+    return dm
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-j", "--abacusjob_dir", type=str, default="./", help="ABACUS job directory to calculate Mayer bond order")
     args = parser.parse_args()
 
     abacusjob_dir = args.abacusjob_dir
-    print(f"Calculate Mayer bond order for {abacusjob_dir}")
-    cal_mayer_bond_order(abacusjob_dir)
+    #print(f"Calculate Mayer bond order for {abacusjob_dir}")
+    #cal_mayer_bond_order(abacusjob_dir)
 
+    lcao_wfc_txt = os.path.join(abacusjob_dir, "OUT.ABACUS/WFC_NAO_K2.txt")
+    wfc, wg, kvec, nbands, nlocal = read_wfc_nao_k(lcao_wfc_txt)
+    dm = calculate_density_matrix_k(wfc, wg)
+    print(wfc, wg, kvec, nbands, nlocal)
+    print(wfc.shape)
+    print(dm)
+    print(dm.shape)
