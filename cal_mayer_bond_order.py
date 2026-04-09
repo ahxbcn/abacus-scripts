@@ -389,49 +389,134 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
                 "No WFC_NAO_K*.txt files found for multi-k-point calculation"
             )
 
-        # Get number of k-points
-        nk = len(wfc_files)
-        print(f"Found {nk} k-points")
+        # For nspin=2, determine the k-point mapping by reading k-vector coordinates
+        # For nspin=2, ABACUS doubles the k-point indices
+        # Files with the same k-vector but different indices are from different spins
+        kpoint_info = []
+        for wfc_file in wfc_files:
+            with open(wfc_file, "r") as f:
+                lines = f.readlines()
+                # First line contains k-point index: "ik (index of k points)"
+                file_idx = int(lines[0].strip().split()[0])
+                # Second line contains k-vector coordinates
+                kvec = tuple(float(x) for x in lines[1].split())
+                kpoint_info.append((wfc_file, file_idx, kvec))
 
-        # Initialize total bond order dictionary
-        total_bond_order = {pair: 0.0 for pair in bonded_pairs}
+        # Group by k-vector to find unique k-points
+        kvec_to_idx = {}
+        for wfc_file, file_idx, kvec in kpoint_info:
+            if kvec not in kvec_to_idx:
+                kvec_to_idx[kvec] = []
+            kvec_to_idx[kvec].append((wfc_file, file_idx))
 
-        for ik in range(nk):
-            # Read wavefunction and k-point (note: file numbering starts from 1)
-            wfc_file = os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt")
-            wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
+        unique_kvecs = list(kvec_to_idx.keys())
+        actual_nk = len(unique_kvecs)
 
-            # Read overlap matrix for this k-point (note: file numbering starts from 0)
-            ovlp_file = os.path.join(out_dir, f"data-{ik}-S")
-            ovlp_mat = read_overlap_matrix(ovlp_file)
+        print(f"Found {len(wfc_files)} WFC files, {actual_nk} unique k-points")
+        print(f"nspin = {nspin}")
 
-            # Calculate density matrix for this k-point
-            dm_k = calculate_density_matrix_k(wfc, wg)
+        if nspin == 2 and len(wfc_files) == 2 * actual_nk:
+            # Spin-polarized: first half are spin-up, second half are spin-down
+            # For spin-up: file indices 1..actual_nk, S indices 0..actual_nk-1
+            # For spin-down: file indices actual_nk+1..2*actual_nk, S indices actual_nk..2*actual_nk-1
+            print("Detected nspin=2: processing spin-up and spin-down separately")
 
-            # Calculate contribution from this k-point for each bonded atom pair
-            for i, j in bonded_pairs:
-                print(f"Calculating contribution from k-point {ik} for atom pair {i} {j}")
-                iorb_atom1 = [
-                    iorb
-                    for iorb in range(
-                        sum(atom_basis_nums[:i]), sum(atom_basis_nums[: i + 1])
+            # Initialize total bond order dictionary
+            total_bond_order = {pair: 0.0 for pair in bonded_pairs}
+
+            # Process each unique k-point
+            for ik_idx, kvec in enumerate(unique_kvecs):
+                files_for_k = kvec_to_idx[kvec]
+
+                # Sort by file index to separate spin-up (lower index) from spin-down (higher index)
+                files_for_k_sorted = sorted(files_for_k, key=lambda x: x[1])
+
+                # First file is spin-up, second is spin-down
+                spin_up_file = files_for_k_sorted[0][0]
+                spin_up_idx = files_for_k_sorted[0][1]  # 1 to actual_nk
+
+                spin_down_file = files_for_k_sorted[1][0]
+                spin_down_idx = files_for_k_sorted[1][1]  # actual_nk+1 to 2*actual_nk
+
+                # Process spin-up
+                # WFC_NAO_K{spin_up_idx}.txt, overlap: data-{spin_up_idx-1}-S
+                ovlp_file_up = os.path.join(out_dir, f"data-{spin_up_idx - 1}-S")
+                ovlp_mat_up = read_overlap_matrix(ovlp_file_up)
+                wfc_up, wg_up, _, _, _ = read_wfc_nao_k(spin_up_file)
+                dm_k_up = calculate_density_matrix_k(wfc_up, wg_up)
+
+                # Process spin-down
+                # WFC_NAO_K{spin_down_idx}.txt, overlap: data-{spin_down_idx-1}-S
+                ovlp_file_dn = os.path.join(out_dir, f"data-{spin_down_idx - 1}-S")
+                ovlp_mat_dn = read_overlap_matrix(ovlp_file_dn)
+                wfc_dn, wg_dn, _, _, _ = read_wfc_nao_k(spin_down_file)
+                dm_k_dn = calculate_density_matrix_k(wfc_dn, wg_dn)
+
+                for i, j in bonded_pairs:
+                    iorb_atom1 = list(
+                        range(sum(atom_basis_nums[:i]), sum(atom_basis_nums[: i + 1]))
                     )
-                ]
-                iorb_atom2 = [
-                    iorb
-                    for iorb in range(
-                        sum(atom_basis_nums[:j]), sum(atom_basis_nums[: j + 1])
+                    iorb_atom2 = list(
+                        range(sum(atom_basis_nums[:j]), sum(atom_basis_nums[: j + 1]))
                     )
-                ]
 
-                bond_order_k = cal_mayer_bond_order_between_atom_pair_k(
-                    iorb_atom1, iorb_atom2, ovlp_mat, dm_k
-                )
-                total_bond_order[(i, j)] += bond_order_k
+                    # Calculate spin-up contribution
+                    bond_order_up = cal_mayer_bond_order_between_atom_pair_k(
+                        iorb_atom1, iorb_atom2, ovlp_mat_up, dm_k_up
+                    )
 
-        # Multiply by nk as suggested by user's observation
-        for key in total_bond_order:
-            total_bond_order[key] *= nk
+                    # Calculate spin-down contribution
+                    bond_order_dn = cal_mayer_bond_order_between_atom_pair_k(
+                        iorb_atom1, iorb_atom2, ovlp_mat_dn, dm_k_dn
+                    )
+
+                    total_bond_order[(i, j)] += bond_order_up + bond_order_dn
+
+            # Multiply by actual_nk as before
+            for key in total_bond_order:
+                total_bond_order[key] *= actual_nk * nspin
+
+        else:
+            # Non-spin-polarized or gamma-only multi-k
+            # Get number of k-points
+            nk = len(wfc_files)
+            print(f"Found {nk} k-points")
+
+            # Initialize total bond order dictionary
+            total_bond_order = {pair: 0.0 for pair in bonded_pairs}
+
+            for ik in range(nk):
+                # Read wavefunction and k-point (note: file numbering starts from 1)
+                wfc_file = os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt")
+                wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
+
+                # Read overlap matrix for this k-point (note: file numbering starts from 0)
+                ovlp_file = os.path.join(out_dir, f"data-{ik}-S")
+                ovlp_mat = read_overlap_matrix(ovlp_file)
+
+                # Calculate density matrix for this k-point
+                dm_k = calculate_density_matrix_k(wfc, wg)
+
+                # Calculate contribution from this k-point for each bonded atom pair
+                for i, j in bonded_pairs:
+                    print(
+                        f"Calculating contribution from k-point {ik} for atom pair {i} {j}"
+                    )
+                    iorb_atom1 = list(
+                        range(sum(atom_basis_nums[:i]), sum(atom_basis_nums[: i + 1]))
+                    )
+                    iorb_atom2 = list(
+                        range(sum(atom_basis_nums[:j]), sum(atom_basis_nums[: j + 1]))
+                    )
+
+                    bond_order_k = cal_mayer_bond_order_between_atom_pair_k(
+                        iorb_atom1, iorb_atom2, ovlp_mat, dm_k
+                    )
+                    total_bond_order[(i, j)] += bond_order_k
+
+            # Multiply by nk as suggested by user's observation
+            for key in total_bond_order:
+                total_bond_order[key] *= nk
 
         # Print results
         print("Mayer Bond Order (Multi-k-point):")
