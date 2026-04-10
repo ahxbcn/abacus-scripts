@@ -290,6 +290,109 @@ def find_bonded_atom_pairs(stru, cutoff_distance=3.5, max_cell_range=5):
     return bonded_pairs
 
 
+def read_kpoints_file(kpoints_file):
+    """
+    Read ABACUS kpoints file to get all k-point coordinates and weights,
+    including symmetry reduction information.
+
+    Returns:
+        dict with keys:
+            'reduced_kpoints': list of reduced k-points
+            'full_kpoints': list of full k-points
+            'kpt_to_ibz': dict mapping full k-point index to IBZ k-point index
+    """
+    reduced_kpoints = []
+    full_kpoints = []
+    kpt_to_ibz = {}
+
+    with open(kpoints_file, "r") as f:
+        lines = f.readlines()
+
+    # Read first section: K-POINTS DIRECT COORDINATES (reduced k-points)
+    found_direct_header = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("K-POINTS DIRECT COORDINATES"):
+            found_direct_header = True
+            continue
+
+        # Stop at empty line (end of direct coordinates section)
+        if found_direct_header and stripped == "":
+            break
+
+        if not found_direct_header:
+            continue
+
+        # Parse k-point data lines
+        parts = stripped.split()
+        if len(parts) >= 5:  # KPOINTS DIRECT_X DIRECT_Y DIRECT_Z WEIGHT
+            try:
+                kpt_idx = int(parts[0])
+                dx = float(parts[1])
+                dy = float(parts[2])
+                dz = float(parts[3])
+                weight = float(parts[4])
+                reduced_kpoints.append(
+                    {"index": kpt_idx, "direct": (dx, dy, dz), "weight": weight}
+                )
+            except ValueError:
+                continue
+
+    # Read second section: K-POINTS REDUCTION ACCORDING TO SYMMETRY
+    found_reduction_header = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("K-POINTS REDUCTION ACCORDING TO SYMMETRY"):
+            found_reduction_header = True
+            continue
+
+        if not found_reduction_header:
+            continue
+
+        # Parse full k-point and IBZ mapping
+        parts = stripped.split()
+        if (
+            len(parts) >= 7
+        ):  # KPT DIRECT_X DIRECT_Y DIRECT_Z IBZ DIRECT_X DIRECT_Y DIRECT_Z
+            try:
+                kpt_idx = int(parts[0])
+                dx = float(parts[1])
+                dy = float(parts[2])
+                dz = float(parts[3])
+                ibz_idx = int(parts[4])
+
+                full_kpoints.append({"index": kpt_idx, "direct": (dx, dy, dz)})
+                kpt_to_ibz[kpt_idx] = ibz_idx
+            except ValueError:
+                continue
+
+    return {
+        "reduced_kpoints": reduced_kpoints,
+        "full_kpoints": full_kpoints,
+        "kpt_to_ibz": kpt_to_ibz,
+    }
+
+
+def find_negative_k(kvec, kpoints_list, tol=1e-6):
+    """
+    Find the index of the k-point (-kx, -ky, -kz) in kpoints_list.
+    """
+    target = (-kvec[0], -kvec[1], -kvec[2])
+    for idx, kpt in enumerate(kpoints_list):
+        d = kpt["direct"]
+        # Check if coordinates match within tolerance, considering periodicity (mod 1.0)
+        diff0 = abs((d[0] - target[0]) % 1.0)
+        diff1 = abs((d[1] - target[1]) % 1.0)
+        diff2 = abs((d[2] - target[2]) % 1.0)
+        if (
+            (diff0 < tol or (1.0 - diff0) < tol)
+            and (diff1 < tol or (1.0 - diff1) < tol)
+            and (diff2 < tol or (1.0 - diff2) < tol)
+        ):
+            return idx
+    return -1
+
+
 def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
     """
     Calculate Mayer bond order from ABACUS calculation output.
@@ -389,43 +492,143 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
                 "No WFC_NAO_K*.txt files found for multi-k-point calculation"
             )
 
-        # For nspin=2, determine the k-point mapping by reading k-vector coordinates
-        # For nspin=2, ABACUS doubles the k-point indices
-        # Files with the same k-vector but different indices are from different spins
-        kpoint_info = []
-        for wfc_file in wfc_files:
-            with open(wfc_file, "r") as f:
-                lines = f.readlines()
-                # First line contains k-point index: "ik (index of k points)"
-                file_idx = int(lines[0].strip().split()[0])
-                # Second line contains k-vector coordinates
-                kvec = tuple(float(x) for x in lines[1].split())
-                kpoint_info.append((wfc_file, file_idx, kvec))
-
-        # Group by k-vector to find unique k-points
+        # Read kpoints file to get full list of k-points and symmetry info
+        kpoints_file = os.path.join(out_dir, "kpoints")
+        use_time_reversal = False
+        kpoints_data = None
+        full_kpoints = []
+        kvec_to_data = {}
+        unique_kvecs = []
+        actual_nk = 0
         kvec_to_idx = {}
-        for wfc_file, file_idx, kvec in kpoint_info:
-            if kvec not in kvec_to_idx:
-                kvec_to_idx[kvec] = []
-            kvec_to_idx[kvec].append((wfc_file, file_idx))
 
-        unique_kvecs = list(kvec_to_idx.keys())
-        actual_nk = len(unique_kvecs)
+        if os.path.exists(kpoints_file):
+            kpoints_data = read_kpoints_file(kpoints_file)
+            reduced_kpoints = kpoints_data["reduced_kpoints"]
+            full_kpoints = kpoints_data["full_kpoints"]
+            kpt_to_ibz = kpoints_data["kpt_to_ibz"]
 
-        print(f"Found {len(wfc_files)} WFC files, {actual_nk} unique k-points")
-        print(f"nspin = {nspin}")
+            print(
+                f"Read {len(reduced_kpoints)} reduced k-points, {len(full_kpoints)} full k-points from kpoints file"
+            )
 
-        if nspin == 2 and len(wfc_files) == 2 * actual_nk:
+            # Check if WFC files are fewer than full k-points (symmetry reduction)
+            if len(wfc_files) < len(full_kpoints):
+                use_time_reversal = True
+                print(
+                    f"Detected symmetry reduction: {len(wfc_files)} WFC files, {len(full_kpoints)} total k-points"
+                )
+                print("Using time reversal symmetry to fill in missing k-points")
+
+        # Initialize total bond order dictionary
+        total_bond_order = {pair: 0.0 for pair in bonded_pairs}
+
+        if use_time_reversal:
+            # Build a map from IBZ k-vector to (dm, ovlp)
+            # For time-reversal symmetry, we need to map IBZ k-points to full k-points
+            # First, read all available WFC and S files
+            ibz_kvec_to_data = {}
+            for wfc_file in wfc_files:
+                # Read k-vector from WFC file
+                with open(wfc_file, "r") as f:
+                    lines = f.readlines()
+                    kvec_str = lines[1].strip()
+                    kvec = tuple(float(x) for x in kvec_str.split())
+
+                # Parse file index from filename: WFC_NAO_K{N}.txt
+                file_basename = os.path.basename(wfc_file)
+                file_idx_str = file_basename.replace("WFC_NAO_K", "").replace(
+                    ".txt", ""
+                )
+                file_idx = int(file_idx_str) - 1  # 0-based
+
+                wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
+                dm_k = calculate_density_matrix_k(wfc, wg)
+
+                ovlp_file = os.path.join(out_dir, f"data-{file_idx}-S")
+                ovlp_mat = read_overlap_matrix(ovlp_file)
+
+                ibz_kvec_to_data[kvec] = (dm_k, ovlp_mat)
+
+            # Now process all full k-points
+            for full_kpt in full_kpoints:
+                full_kvec = full_kpt["direct"]
+                full_kpt_idx = full_kpt["index"]
+
+                # Find corresponding IBZ k-point index
+                ibz_kpt_idx = kpt_to_ibz[full_kpt_idx]
+
+                # Get IBZ k-point's coordinates
+                ibz_kpt = reduced_kpoints[ibz_kpt_idx - 1]  # IBZ indices start at 1
+                ibz_kvec = ibz_kpt["direct"]
+
+                dm_k = None
+                ovlp_mat = None
+
+                # First check if we have this IBZ k-point directly
+                if ibz_kvec in ibz_kvec_to_data:
+                    dm_k, ovlp_mat = ibz_kvec_to_data[ibz_kvec]
+                else:
+                    # Check if we can get it via time reversal: -k point
+                    neg_ibz_kvec = (-ibz_kvec[0], -ibz_kvec[1], -ibz_kvec[2])
+
+                    # Find the IBZ k-point for -kvec
+                    neg_ibz_kpt_idx = -1
+                    for idx, kpt in enumerate(reduced_kpoints):
+                        d = kpt["direct"]
+                        # Check if coordinates match within tolerance, considering periodicity
+                        tol = 1e-6
+                        diff0 = abs((d[0] - neg_ibz_kvec[0]) % 1.0)
+                        diff1 = abs((d[1] - neg_ibz_kvec[1]) % 1.0)
+                        diff2 = abs((d[2] - neg_ibz_kvec[2]) % 1.0)
+                        if (
+                            (diff0 < tol or (1.0 - diff0) < tol)
+                            and (diff1 < tol or (1.0 - diff1) < tol)
+                            and (diff2 < tol or (1.0 - diff2) < tol)
+                        ):
+                            neg_ibz_kpt_idx = idx
+                            break
+
+                    if neg_ibz_kpt_idx != -1:
+                        neg_ibz_kpt = reduced_kpoints[neg_ibz_kpt_idx]
+                        neg_kvec = neg_ibz_kpt["direct"]
+                        if neg_kvec in ibz_kvec_to_data:
+                            # Apply time reversal: P(-k) = P(k)^*, S(-k) = S(k)^*
+                            dm_neg, ovlp_neg = ibz_kvec_to_data[neg_kvec]
+                            dm_k = dm_neg.conj()
+                            ovlp_mat = ovlp_neg.conj()
+
+                if dm_k is not None and ovlp_mat is not None:
+                    # Calculate contribution from this k-point
+                    for i, j in bonded_pairs:
+                        iorb_atom1 = list(
+                            range(
+                                sum(atom_basis_nums[:i]), sum(atom_basis_nums[: i + 1])
+                            )
+                        )
+                        iorb_atom2 = list(
+                            range(
+                                sum(atom_basis_nums[:j]), sum(atom_basis_nums[: j + 1])
+                            )
+                        )
+                        bond_order_k = cal_mayer_bond_order_between_atom_pair_k(
+                            iorb_atom1, iorb_atom2, ovlp_mat, dm_k
+                        )
+                        total_bond_order[(i, j)] += bond_order_k
+
+            # Multiply by total k-point count TWICE as done in symmetry=-1 case
+            nk_total = len(full_kpoints)
+            for key in total_bond_order:
+                total_bond_order[key] *= nk_total * nk_total
+
+        elif nspin == 2 and len(wfc_files) == 2 * actual_nk:
             # Spin-polarized: first half are spin-up, second half are spin-down
             # For spin-up: file indices 1..actual_nk, S indices 0..actual_nk-1
             # For spin-down: file indices actual_nk+1..2*actual_nk, S indices actual_nk..2*actual_nk-1
             print("Detected nspin=2: processing spin-up and spin-down separately")
 
-            # Initialize total bond order dictionary
-            total_bond_order = {pair: 0.0 for pair in bonded_pairs}
-
             # Process each unique k-point
-            for ik_idx, kvec in enumerate(unique_kvecs):
+            for kvec in unique_kvecs:
                 files_for_k = kvec_to_idx[kvec]
 
                 # Sort by file index to separate spin-up (lower index) from spin-down (higher index)
@@ -472,7 +675,7 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
 
                     total_bond_order[(i, j)] += bond_order_up + bond_order_dn
 
-            # Multiply by actual_nk as before
+            # Multiply by actual_nk * nspin as before
             for key in total_bond_order:
                 total_bond_order[key] *= actual_nk * nspin
 
@@ -481,9 +684,6 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
             # Get number of k-points
             nk = len(wfc_files)
             print(f"Found {nk} k-points")
-
-            # Initialize total bond order dictionary
-            total_bond_order = {pair: 0.0 for pair in bonded_pairs}
 
             for ik in range(nk):
                 # Read wavefunction and k-point (note: file numbering starts from 1)
@@ -523,8 +723,7 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
         for (i, j), bo in total_bond_order.items():
             atomtype1, atomtype2 = stru.atoms[i].label, stru.atoms[j].label
             bo_real = bo.real if isinstance(bo, np.complex128) else bo
-            if bo_real > 0.2:
-                print(f"{atomtype1}{i + 1} - {atomtype2}{j + 1}: {bo_real:10f}")
+            print(f"{atomtype1}{i + 1} - {atomtype2}{j + 1}: {bo_real:10f}")
 
 
 def read_wfc_nao_k(file_path):
