@@ -442,10 +442,17 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
         f"Found {len(bonded_pairs)} bonded pairs out of {stru.natoms * (stru.natoms - 1) // 2} total pairs"
     )
 
-    # Check if we have WFC_NAO_K*.txt files to determine if it's multi-k-point
+    out_wfc_lcao = input_params.get("out_wfc_lcao", 1)
+
     import glob
 
-    wfc_files = glob.glob(os.path.join(out_dir, "WFC_NAO_K*.txt"))
+    if out_wfc_lcao == 2:
+        wfc_files = sorted(glob.glob(os.path.join(out_dir, "WFC_NAO_K*.dat")))
+        wfc_suffix = ".dat"
+    else:
+        wfc_files = sorted(glob.glob(os.path.join(out_dir, "WFC_NAO_K*.txt")))
+        wfc_suffix = ".txt"
+
     is_multi_k = len(wfc_files) > 0
 
     if gamma_only == 1 and not is_multi_k:
@@ -483,13 +490,14 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
             if mayer_bond_order > 0.2:
                 print(f"{atomtype1}{i + 1} - {atomtype2}{j + 1}: {mayer_bond_order}")
     else:
-        # Multi-k-point calculation
-        # Find all k-point files
-        wfc_files = sorted(glob.glob(os.path.join(out_dir, "WFC_NAO_K*.txt")))
+        wfc_suffix_stripped = wfc_suffix.replace(".", "")
+        wfc_files = sorted(
+            glob.glob(os.path.join(out_dir, f"WFC_NAO_K*.{wfc_suffix_stripped}"))
+        )
 
         if not wfc_files:
             raise FileNotFoundError(
-                "No WFC_NAO_K*.txt files found for multi-k-point calculation"
+                f"No WFC_NAO_K*.{wfc_suffix_stripped} files found for multi-k-point calculation"
             )
 
         # Read kpoints file to get full list of k-points and symmetry info
@@ -530,19 +538,25 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
             ibz_kvec_to_data = {}
             for wfc_file in wfc_files:
                 # Read k-vector from WFC file
-                with open(wfc_file, "r") as f:
-                    lines = f.readlines()
-                    kvec_str = lines[1].strip()
-                    kvec = tuple(float(x) for x in kvec_str.split())
+                if wfc_suffix == ".dat":
+                    wfc, wg, kvec_np, _, _ = read_wfc_nao_k_dat(wfc_file)
+                    kvec = tuple(kvec_np)  # Convert to tuple for hashing
+                    file_basename = os.path.basename(wfc_file)
+                    file_idx_str = file_basename.replace("WFC_NAO_K", "").replace(
+                        ".dat", ""
+                    )
+                else:
+                    with open(wfc_file, "r") as f:
+                        lines = f.readlines()
+                        kvec_str = lines[1].strip()
+                        kvec = tuple(float(x) for x in kvec_str.split())
 
-                # Parse file index from filename: WFC_NAO_K{N}.txt
-                file_basename = os.path.basename(wfc_file)
-                file_idx_str = file_basename.replace("WFC_NAO_K", "").replace(
-                    ".txt", ""
-                )
+                    file_basename = os.path.basename(wfc_file)
+                    file_idx_str = file_basename.replace("WFC_NAO_K", "").replace(
+                        f".{wfc_suffix.replace('.', '')}", ""
+                    )
                 file_idx = int(file_idx_str) - 1  # 0-based
 
-                wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
                 dm_k = calculate_density_matrix_k(wfc, wg)
 
                 ovlp_file = os.path.join(out_dir, f"data-{file_idx}-S")
@@ -642,17 +656,21 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
                 spin_down_idx = files_for_k_sorted[1][1]  # actual_nk+1 to 2*actual_nk
 
                 # Process spin-up
-                # WFC_NAO_K{spin_up_idx}.txt, overlap: data-{spin_up_idx-1}-S
                 ovlp_file_up = os.path.join(out_dir, f"data-{spin_up_idx - 1}-S")
                 ovlp_mat_up = read_overlap_matrix(ovlp_file_up)
-                wfc_up, wg_up, _, _, _ = read_wfc_nao_k(spin_up_file)
+                if wfc_suffix == ".dat":
+                    wfc_up, wg_up, _, _, _ = read_wfc_nao_k_dat(spin_up_file)
+                else:
+                    wfc_up, wg_up, _, _, _ = read_wfc_nao_k(spin_up_file)
                 dm_k_up = calculate_density_matrix_k(wfc_up, wg_up)
 
                 # Process spin-down
-                # WFC_NAO_K{spin_down_idx}.txt, overlap: data-{spin_down_idx-1}-S
                 ovlp_file_dn = os.path.join(out_dir, f"data-{spin_down_idx - 1}-S")
                 ovlp_mat_dn = read_overlap_matrix(ovlp_file_dn)
-                wfc_dn, wg_dn, _, _, _ = read_wfc_nao_k(spin_down_file)
+                if wfc_suffix == ".dat":
+                    wfc_dn, wg_dn, _, _, _ = read_wfc_nao_k_dat(spin_down_file)
+                else:
+                    wfc_dn, wg_dn, _, _, _ = read_wfc_nao_k(spin_down_file)
                 dm_k_dn = calculate_density_matrix_k(wfc_dn, wg_dn)
 
                 for i, j in bonded_pairs:
@@ -687,8 +705,11 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff_distance=3.5):
 
             for ik in range(nk):
                 # Read wavefunction and k-point (note: file numbering starts from 1)
-                wfc_file = os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt")
-                wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
+                wfc_file = os.path.join(out_dir, f"WFC_NAO_K{ik + 1}{wfc_suffix}")
+                if wfc_suffix == ".dat":
+                    wfc, wg, _, _, _ = read_wfc_nao_k_dat(wfc_file)
+                else:
+                    wfc, wg, _, _, _ = read_wfc_nao_k(wfc_file)
 
                 # Read overlap matrix for this k-point (note: file numbering starts from 0)
                 ovlp_file = os.path.join(out_dir, f"data-{ik}-S")
@@ -776,6 +797,50 @@ def read_wfc_nao_k(file_path):
                     if ilocal < nlocal:
                         wfc[ilocal, ib] = c[i]
                         ilocal += 1
+
+    return wfc, wg, kvec_c, nbands, nlocal
+
+
+def read_wfc_nao_k_dat(file_path):
+    """
+    Read binary dat format wavefunction file WFC_NAO_K*.dat
+    """
+    import struct
+
+    with open(file_path, "rb") as f:
+        data = f.read()
+
+    pos = 0
+
+    def read_int():
+        nonlocal pos
+        val = struct.unpack("@i", data[pos : pos + 4])[0]
+        pos += 4
+        return val
+
+    def read_double():
+        nonlocal pos
+        val = struct.unpack("@d", data[pos : pos + 8])[0]
+        pos += 8
+        return val
+
+    ik_plus_1 = read_int()
+    kvec_c = np.array([read_double(), read_double(), read_double()])
+    nbands = read_int()
+    nlocal = read_int()
+
+    wfc = np.zeros((nlocal, nbands), dtype=np.complex128)
+    wg = np.zeros(nbands)
+
+    for i in range(nbands):
+        band_idx = read_int()
+        ekb = read_double()
+        wg[band_idx - 1] = read_double()
+
+        for j in range(nlocal):
+            real_part = read_double()
+            imag_part = read_double()
+            wfc[j, band_idx - 1] = complex(real_part, imag_part)
 
     return wfc, wg, kvec_c, nbands, nlocal
 
