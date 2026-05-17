@@ -44,17 +44,24 @@ WFC 文件按 k1↑...kn↑, k1↓...kn↓ 排列。
 
 ### 核心函数
 
-| 函数 | 职责 |
+### 文件结构（487 行）
+
+| 行范围 | 内容 |
 |---|---|
-| `read_nao_file()` | 解析 NAO 轨道文件（.orb），获取基函数数量和轨道数据 |
-| `get_nao_basis_num()` | 计算原子基函数数：Σ(2l+1)×norb |
-| `read_overlap_matrix()` | 解析 data-*-S 文件（支持实数和复数格式） |
-| `read_density_matrix()` | 解析 SPIN*_DM 文件（gamma-only） |
-| `read_wfc_nao_k()` | 解析 WFC_NAO_K*.txt 波函数文件（多 k 点） |
-| `calculate_density_matrix_k()` | 从波函数构建 P_k = C·diag(wg)·C^H |
-| `read_kpoint_weights()` | 解析 kpoints 文件获取 IBZ 权重 |
-| `cal_mayer_bond_order_between_atom_pair()` | gamma-only 键级计算（含 nspin=2） |
-| `cal_mayer_bond_order_between_atom_pair_k()` | 单 k 点键级计算 |
+| 1-36 | 导入 + `AbacusNAO` 数据类 |
+| 37-82 | `read_nao_file` — NAO 轨道解析 |
+| 83-89 | `get_nao_basis_num` — 基函数计数 |
+| 90-151 | `read_overlap_matrix` — 重叠矩阵（实数/复数） |
+| 152-178 | `read_density_matrix` — SPIN*_DM 解析 |
+| 179-195 | `cal_mayer_bond_order_between_atom_pair` — gamma-only 键级 |
+| 196-233 | `read_wfc_nao_k` — 波函数解析 |
+| 234-238 | `calculate_density_matrix_k` — P_k 构造 |
+| 239-249 | `cal_mayer_bond_order_between_atom_pair_k` — 单 k 点键级 |
+| 250-275 | `read_kpoint_weights` — IBZ 权重解析 |
+| 276-294 | `calculate_minimum_distance` — 最小成像距离 |
+| 295-338 | `select_atom_pairs` — 原子对筛选 |
+| 339-476 | `cal_mayer_bond_order` — 主控逻辑 |
+| 477-498 | `__main__` — 命令行接口 |
 
 ### 主控流程
 
@@ -152,14 +159,16 @@ K-POINTS REDUCTION ACCORDING TO SYMMETRY
 
 ## 已验证的测试案例
 
-| 案例 | 模式 | nspin | k 点数 | 键级 | 参考值 |
-|---|---|---|---|---|---|
-| H₂ | gamma-only | 1 | - | H-H: 1.000139 | 1.0 (单键) |
-| O₂ | gamma-only | 2 | - | O-O: 2.009262 | 2.0 (双键) |
-| Diamond sym=-1 | multi-k | 1 | 64 | C-C: 0.995160 | 1.0 (单键) |
-| Diamond sym=0 | multi-k TRS | 1 | 36 | C-C: 0.995160 | 1.0 (单键) |
-| CrI₃ sym=-1 | multi-k | 2 | 9 | Cr-I: 0.687904 | - |
-| CrI₃ sym=0 | multi-k TRS | 2 | 5 | Cr-I: 0.687904 | - |
+所有 18 个组合（6 案例 × 3 筛选模式）均验证通过：
+
+| 案例 | nspin | sym | k 点 | 默认 | `--cutoff` | `--pairs` | 键级 |
+|---|---|---|---|---|---|---|---|
+| H₂ | 1 | — | — | ✅ | ✅ | ✅ | 1.000139 |
+| O₂ | 2 | — | — | ✅ | ✅ | ✅ | 2.009262 |
+| Diamond | 1 | -1 | 64 | ✅ | ✅ | ✅ | 0.995160 |
+| Diamond | 1 | 0 | 36 | ✅ | ✅ | ✅ | 0.995160 |
+| CrI₃ | 2 | -1 | 9 | ✅ | ✅ | ✅ | 0.687904 |
+| CrI₃ | 2 | 0 | 5 | ✅ | ✅ | ✅ | 0.687904 |
 
 symmetry=-1 和 symmetry=0 结果完全一致，验证了 TRS 权重处理（Σ M_k / wk）的正确性。
 
@@ -209,13 +218,31 @@ D(Rk) = M(R,k)^† · D(k_IBZ) · M(R,k)
 ## 已修复的 Bug
 
 | Bug | 原因 | 修复 |
-|---|---|---|
+|---|---|---|---|
 | `out_mat_hs == 1` 断言失败 | `out_mat_hs 1 8` 被 ReadInput 解析为 `[1,8]` | 取首元素：`out_mat_hs[0] if isinstance` |
 | `orbital_dir` 为 None 导致崩溃 | 参数存在但值为空时 `get('key', default)` 返回 None | `get('orbital_dir') or abacusjob_dir` |
 | 多 k 点复数 S 矩阵解析崩溃 | `read_overlap_matrix` 仅处理实数 | 检测并解析 `(real,imag)` 格式 |
 | 复数 PS 矩阵导致累加异常 | 复数乘法产生虚部 | 键级累加取 `.real` |
 | `×nk` 修正因子对非均匀权重错误 | P_k 含 wk²，需除以 wk | 改为 `Σ M_k / wk` |
 | 字典序 WFC 文件索引错误 | `sorted(glob)` 产生 K1,K10,... 而非 K1,K2,... | 用 `f"WFC_NAO_K{ik+1}.txt"` 直接构造路径 |
+
+## 原子对筛选
+
+通过 `--cutoff` 或 `--pairs` 参数可以在计算前筛选原子对，避免计算所有 n×(n-1)/2 对。
+
+| 模式 | 用法 | 说明 |
+|---|---|---|
+| 默认（全部） | 不指定参数 | 计算所有 i<j 原子对 |
+| 距离截断 | `--cutoff 2.0` | 仅计算最小成像距离 ≤ 2.0 Å 的原子对 |
+| 指定原子对 | `--pairs "1-2,3-5"` | 仅计算指定的原子对（1-indexed） |
+
+两种参数互斥。筛选不影响矩阵乘法（O(N³)），但减少原子对遍历（O(N²)）和避免输出噪声。
+
+## k 空间 vs R 空间 Mayer 键级
+
+当前实现使用 k 空间密度矩阵，计算的是参考原胞内原子对 (A,B) 的键级，但**所有周期性镜像的贡献通过 k 积分被隐式叠加**。对于 2 原子 diamond 原胞，4 条等价 C-C 键的贡献全部映射到唯一的 (C1,C2) 对上，M ≈ 4。
+
+如需分离各周期性镜像的键级，需使用 ABACUS 的 R 空间矩阵（`data-DMR-sparse_*.csr`，`data-SR-sparse_*.csr`），当前版本不支持。
 
 ## 依赖
 
@@ -226,7 +253,14 @@ D(Rk) = M(R,k)^† · D(k_IBZ) · M(R,k)
 ## 使用方法
 
 ```bash
+# 默认：计算所有原子对
 python cal_mayer_bond_order.py -j /path/to/abacus_job_dir
+
+# 距离截断：仅计算 2.0 Å 内的原子对
+python cal_mayer_bond_order.py -j /path/to/abacus_job_dir --cutoff 2.0
+
+# 指定原子对（1-indexed）
+python cal_mayer_bond_order.py -j /path/to/abacus_job_dir --pairs "1-2,1-4"
 ```
 
 前置条件：
@@ -235,8 +269,38 @@ python cal_mayer_bond_order.py -j /path/to/abacus_job_dir
 - 多 k 点模式需 `out_wfc_lcao 1`（输出波函数）
 - NAO 轨道文件（.orb）在作业目录中
 
+## 待补充的测试案例（nspin=2 + multi-k）
+
+当前测试仅覆盖 CrI₃ 一种成键类型（Cr³⁺-I⁻ 离子键，BO≈0.69）。以下体系适合作为 nspin=2 + multi-k 下共价键级整数参考的验证案例：
+
+### 简单分子（快速验证）
+
+| 体系 | 基态 | 键型 | 预期 BO | 特点 |
+|---|---|---|---|---|
+| N₂ 三重态 | 强制 nspin=2 | N≡N | ≈3.0 | 最清晰的整数三重键参考 |
+| O₂ multi-k | 自然 nspin=2 | O=O | ≈2.0 | 已有 gamma-only 结果对照 |
+| S₂ 三重态 | 自然 nspin=2 | S=S | ≈2.0 | 重元素，验证基组收敛性 |
+| NO 自由基 | 自然 nspin=2 | N=O | ≈2.5 | 奇电子分子，非整数但有标准值 |
+
+### 真实材料（全面验证）
+
+| 材料 | 磁性 | 结构 | 关键键 | 预期 BO | 选择理由 |
+|---|---|---|---|---|---|
+| VO₂ M1 | AFM singlet配对 | 单斜 P2₁/c | V–V dimer | ≈1.0 | 金属-绝缘体相变，V-V单键物理意义明确 |
+| MnO | AFM (AF-II) | 岩盐 | Mn–O | ~0.3–0.5 | 经典 AFM 绝缘体，pd杂化共价 |
+| NiO | AFM (AF-II) | 岩盐 | Ni–O | ~0.5–0.7 | 比 MnO 共价性更强，Mott绝缘体 |
+| CrO₂ | FM 半金属 | 金红石 | Cr–O | ~0.8–1.0 | 强共价，自旋极化率100% |
+| CoO | AFM (AF-II) | 岩盐 | Co–O | ~0.4–0.6 | 含自旋-轨道耦合 |
+| Fe₃O₄ | 亚铁磁 | 反尖晶石 | Fe²⁺–O, Fe³⁺–O | 可区分 | 混合价态，两种Fe位 |
+
+### 推荐优先级
+
+1. **VO₂ M1** — V-V 二聚体键级 ≈1.0，金属-绝缘体相变的关键序参量
+2. **MnO AFM** — AFM 绝缘体的标准模型，文献丰富
+3. **CrO₂** — 半金属铁磁体，键级可作为自旋极化探针
+
 ## 文件版本
 
 - 当前分支：`mayer_bo_multik`
 - 文件名：`cal_mayer_bond_order.py`
-- 行数：417 行
+- 行数：487 行
