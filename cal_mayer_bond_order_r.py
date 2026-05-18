@@ -34,7 +34,7 @@ def parse_csr_header(lines):
 
 def parse_csr_matrix(lines, start_line, nbasis):
     """Parse a single CSR (rx, ry, rz, nnz, values, col_idx, row_ptr) block.
-    Returns (rx, ry, rz, csr_data) where csr_data = (values, col_ind, row_ptr).
+    Returns (rx, ry, rz, csr_data) and the next line index.
     """
     if start_line >= len(lines):
         return None
@@ -47,6 +47,10 @@ def parse_csr_matrix(lines, start_line, nbasis):
     ry = int(parts[1])
     rz = int(parts[2])
     nnz = int(parts[3])
+
+    if nnz == 0:
+        # Empty block: skip the rest
+        return (rx, ry, rz, ([], [], [0] * (nbasis + 1))), start_line + 1
 
     # Read values line
     vals = [float(x) for x in lines[start_line + 1].strip().split()]
@@ -228,23 +232,30 @@ def select_atom_pairs(stru, cutoff=None, pairs_str=None):
 
 # ---- Mayer bond order in R-space ----
 
-def cal_mayer_bond_order_r_pair(iorb_atom1, iorb_atom2, dm_csr, ovlp_csr):
-    """Compute Mayer bond order between two atoms from R-space CSR matrices.
-    Extracts sub-blocks, multiplies, and sums the trace.
+def csr_to_dense(csr_data, nbasis):
+    """Convert CSR sparse matrix to dense numpy array."""
+    vals, col_ind, row_ptr = csr_data
+    dense = np.zeros((nbasis, nbasis))
+    for r in range(nbasis):
+        for idx in range(row_ptr[r], row_ptr[r + 1]):
+            dense[r, col_ind[idx]] = vals[idx]
+    return dense
+
+
+def cal_mayer_bond_order_r_pair(iorb_atom1, iorb_atom2, dm_dense, ovlp_dense):
+    """Compute Mayer bond order between two atoms from dense D and S matrices.
+    Uses PS = D @ S (full product), then extracts the cross-block.
     """
+    PS = dm_dense @ ovlp_dense
+
     r1_start, r1_end = iorb_atom1[0], iorb_atom1[-1] + 1
     r2_start, r2_end = iorb_atom2[0], iorb_atom2[-1] + 1
 
-    # Extract D_AB sub-block
-    D_AB = extract_submatrix(dm_csr, r1_start, r1_end, r2_start, r2_end)
-    # Extract S_AB sub-block
-    S_AB = extract_submatrix(ovlp_csr, r1_start, r1_end, r2_start, r2_end)
+    PS_AB = PS[r1_start:r1_end, r2_start:r2_end]
+    PS_BA = PS[r2_start:r2_end, r1_start:r1_end]
 
-    # PS = D_AB @ S_AB  (D is symmetric/Hermitian, but we use the extracted block)
-    PS = D_AB @ S_AB
-
-    # M = Σ_{μ,ν} PS[μ,ν] * PS[ν,μ]  (trace of PS^T * PS for this rectangular block)
-    mayer_bond_order = np.sum(PS * PS.T)
+    # M = Σ_{μ∈A, ν∈B} PS_μν · PS_νμ = trace(PS_AB @ PS_BA)
+    mayer_bond_order = np.trace(PS_AB @ PS_BA)
     return mayer_bond_order
 
 
@@ -289,21 +300,24 @@ def cal_mayer_bond_order_r(abacusjob_dir, cutoff=None, pairs_str=None):
                           for j in range(i + 1, stru.natoms)]
 
     # Read DMR files
-    dmr_file = os.path.join(out_dir, "data-DMR-sparse_SPIN1.csr")
+    dmr_spin = "SPIN0"
+    dmr_file = os.path.join(out_dir, f"data-DMR-sparse_{dmr_spin}.csr")
     if not os.path.exists(dmr_file):
         raise FileNotFoundError(f"DMR file not found: {dmr_file}\n"
                                 "Set 'out_dm1 1' in INPUT to generate it.")
 
-    _, dmr_matrices = read_csr_file(dmr_file)
-    print(f"Loaded DMR: {len(dmr_matrices)} R-vectors.")
+    nbasis, dmr_matrices = read_csr_file(dmr_file)
+    print(f"Loaded DMR: {len(dmr_matrices)} R-vectors, nbasis={nbasis}.")
 
     if nspin == 2:
-        dmr_dn_file = os.path.join(out_dir, "data-DMR-sparse_SPIN2.csr")
+        dmr_dn_file = os.path.join(out_dir, "data-DMR-sparse_SPIN1.csr")
         if not os.path.exists(dmr_dn_file):
             raise FileNotFoundError(f"DMR down-spin file not found: {dmr_dn_file}")
         _, dmr_dn_matrices = read_csr_file(dmr_dn_file)
+        dmr_dn_map = {(rx, ry, rz): csr for rx, ry, rz, csr in dmr_dn_matrices}
     else:
         dmr_dn_matrices = None
+        dmr_dn_map = {}
 
     # Read SR files
     sr_file = os.path.join(out_dir, "data-SR-sparse_SPIN0.csr")
@@ -314,37 +328,42 @@ def cal_mayer_bond_order_r(abacusjob_dir, cutoff=None, pairs_str=None):
     _, sr_matrices = read_csr_file(sr_file)
     print(f"Loaded SR: {len(sr_matrices)} R-vectors.")
 
-    # Compute per atom pair
-    total_bond_order = {}
-    for i, j in selected_pairs:
-        total_bond_order[(i, j)] = 0.0
+    # Build SR map for O(1) lookup by R-vector
+    sr_map = {(rx, ry, rz): csr for rx, ry, rz, csr in sr_matrices}
 
-    nR = len(dmr_matrices)
-    print(f"Computing Mayer bond order over {nR} R-vectors...")
+    # Sum D(R) and S(R) over all R-vectors to get total matrices.
+    # This gives the correct P(k=0) for gamma-only, or the k=0 component for multi-k.
+    # For full multi-k, use cal_mayer_bond_order.py (k-space version) instead.
+    D_total = np.zeros((nbasis, nbasis))
+    S_total = np.zeros((nbasis, nbasis))
 
-    for iR, ((rx, ry, rz, dm_csr), (_, _, _, sr_csr)) in enumerate(
-        zip(dmr_matrices, sr_matrices)
-    ):
-        for i, j in selected_pairs:
-            s1, e1 = atom_orb_ranges[i]
-            s2, e2 = atom_orb_ranges[j]
-            bo = cal_mayer_bond_order_r_pair(
-                list(range(s1, e1)), list(range(s2, e2)), dm_csr, sr_csr)
-            total_bond_order[(i, j)] += bo
+    for rx, ry, rz, dm_csr in dmr_matrices:
+        sr_csr = sr_map.get((rx, ry, rz))
+        if sr_csr is None or not dm_csr[0] or not sr_csr[0]:
+            continue
+        D_total += csr_to_dense(dm_csr, nbasis)
+        S_total += csr_to_dense(sr_csr, nbasis)
 
-            if nspin == 2 and dmr_dn_matrices is not None:
-                _, _, _, dm_dn_csr = dmr_dn_matrices[iR]
-                bo_dn = cal_mayer_bond_order_r_pair(
-                    list(range(s1, e1)), list(range(s2, e2)), dm_dn_csr, sr_csr)
-                total_bond_order[(i, j)] += bo_dn
+    print(f"Summed {len(dmr_matrices)} R-vectors to total matrices.")
 
-    if nspin == 2:
-        for pair in total_bond_order:
-            total_bond_order[pair] *= 2.0
-
+    # Compute Mayer bond order from total matrices
     print("Mayer Bond Order (R-space):")
     for i, j in selected_pairs:
-        bo = total_bond_order[(i, j)]
+        s1, e1 = atom_orb_ranges[i]
+        s2, e2 = atom_orb_ranges[j]
+        bo = cal_mayer_bond_order_r_pair(
+            list(range(s1, e1)), list(range(s2, e2)), D_total, S_total)
+
+        if nspin == 2 and dmr_dn_matrices is not None:
+            D_dn_total = np.zeros((nbasis, nbasis))
+            for rx2, ry2, rz2, dm_csr2 in dmr_dn_matrices:
+                if not dm_csr2[0]:
+                    continue
+                D_dn_total += csr_to_dense(dm_csr2, nbasis)
+            bo_dn = cal_mayer_bond_order_r_pair(
+                list(range(s1, e1)), list(range(s2, e2)), D_dn_total, S_total)
+            bo = 2.0 * (bo + bo_dn)
+
         if bo > 0.2:
             print(f"  {stru.atoms[i].label}{i + 1} - {stru.atoms[j].label}{j + 1}: {bo:.6f}")
 
