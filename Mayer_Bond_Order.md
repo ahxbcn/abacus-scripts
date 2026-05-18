@@ -264,10 +264,56 @@ python cal_mayer_bond_order.py -j /path/to/abacus_job_dir --pairs "1-2,1-4"
 ```
 
 前置条件：
-- INPUT 中 `out_mat_hs 1`（输出重叠矩阵）
-- gamma-only 模式需 `out_dm 1`（输出密度矩阵）
-- 多 k 点模式需 `out_wfc_lcao 1`（输出波函数）
+- k 空间 (cal_mayer_bond_order.py):
+  - INPUT 中 `out_mat_hs 1`（输出重叠矩阵）
+  - gamma-only 模式需 `out_dm 1`（输出密度矩阵）
+  - 多 k 点模式需 `out_wfc_lcao 1`（输出波函数）
+- R 空间 (cal_mayer_bond_order_r.py):
+  - INPUT 中 `out_dm1 1`（输出实空间密度矩阵）
+  - INPUT 中 `out_mat_hs2 1`（输出实空间重叠矩阵）
 - NAO 轨道文件（.orb）在作业目录中
+
+## R 空间 Mayer 键级脚本
+
+`cal_mayer_bond_order_r.py`（367 行）使用实空间密度矩阵和重叠矩阵计算 Mayer 键级。
+
+### 与 k 空间版本的区别
+
+| | `cal_mayer_bond_order.py` (k 空间) | `cal_mayer_bond_order_r.py` (R 空间) |
+|---|---|---|
+| 数据来源 | `data-*-S` + SPIN*_DM / WFC | `data-DMR-sparse_SPIN*.csr` + `data-SR-sparse_SPIN*.csr` |
+| 矩阵格式 | 稠密上三角 / 完整 | CSR 稀疏 |
+| R 分辨率 | k 积分折叠所有 R | 每个 R 独立 |
+| 所需 ABACUS 参数 | `out_mat_hs 1`, `out_dm 1` (或 `out_wfc_lcao`) | `out_dm1 1`, `out_mat_hs2 1` |
+| 计算量 | O(N³) 全矩阵乘 | O(nnz) 子块提取 + O(b_A·b_B²) |
+
+### 文件格式（CSR）
+
+```
+STEP: 1
+Matrix Dimension of DM(R): 10
+Matrix number of DM(R): 3
+ 0  0  0  25           ← R=(0,0,0), 25 个非零元
+ 1.0 0.5 ...            ← 值（nnz 个）
+ 0 1 2 3 ...            ← 列索引（nnz 个）
+ 0 5 10 15 20 25        ← row_ptr（nbasis+1 个）
+ 1  0  0  20           ← R=(1,0,0), 20 个非零元
+ ...
+```
+
+### 算法
+
+对每个 R 向量和原子对 (A, B)：
+1. 从 CSR 中提取 D(R)[b_A×b_B] 和 S(R)[b_A×b_B] 子块
+2. 计算 PS = D_AB @ S_AB
+3. M_AB^R = Σ PS[μ,ν]·PS[ν,μ] = sum(PS * PS^T)
+4. M_AB = Σ_R M_AB^R
+
+nspin=2 时，上下自旋分别计算后乘以 2。
+
+### 待验证
+
+脚本语法和导入检查通过，但需要 ABACUS 生成包含 `data-DMR-sparse` 和 `data-SR-sparse` 文件的测试数据才能全面验证。建议先用 H₂ 或 O₂ 等小体系测试。
 
 ## 待补充的测试案例（nspin=2 + multi-k）
 
