@@ -1,5 +1,6 @@
 """
-Calculate Mayer bond order for gamma-only calculations of ABACUS using LCAO basis.
+Calculate Mayer bond order for ABACUS LCAO calculations.
+Supports both gamma-only and multi-k calculations.
 """
 import os
 from dataclasses import dataclass, field, fields
@@ -151,8 +152,10 @@ def read_density_matrix(rho_mat_file):
     dim_line = empty_lines_idx[-1] - 1
     dims = [int(s) for s in lines[dim_line].split()]
 
-    assert len(dims) == 2
-    assert dims[0] == dims[1]
+    if len(dims) != 2:
+        raise ValueError(f"Expected 2 dimensions, got {len(dims)}")
+    if dims[0] != dims[1]:
+        raise ValueError(f"Density matrix must be square, got {dims[0]}x{dims[1]}")
 
     ndim = dims[0]
 
@@ -161,27 +164,28 @@ def read_density_matrix(rho_mat_file):
         line_vals = [float(x) for x in lines[iline].split()]
         vals.extend(line_vals)
 
-    assert len(vals) == ndim * ndim
+    if len(vals) != ndim * ndim:
+        raise ValueError(f"Expected {ndim * ndim} values, got {len(vals)}")
     dm_mat = np.array(vals).reshape(ndim, ndim)
 
     return dm_mat
 
-def cal_mayer_bond_order_between_atom_pair(iorb_atom1, iorb_atom2, ovlp_mat, dm, dm_dn=None):
+def cal_mayer_bond_order_between_atom_pair(i, j, atom_orb_ranges, ovlp_mat, dm, dm_dn=None):
     """
     Calculate Mayer bond order between two atoms.
     """
-    mayer_bond_order = 0
-    if dm_dn is None:
-        PS = dm @ ovlp_mat
-        for iorb in iorb_atom1:
-            for jorb in iorb_atom2:
-                mayer_bond_order += (PS[iorb, jorb] * PS[jorb, iorb]).real
-    else:
-        PS = dm @ ovlp_mat
+    s1, e1 = atom_orb_ranges[i]
+    s2, e2 = atom_orb_ranges[j]
+    PS = dm @ ovlp_mat
+    PS_AB = PS[s1:e1, s2:e2]
+    PS_BA = PS[s2:e2, s1:e1]
+    mayer_bond_order = np.sum(PS_AB * PS_BA.T).real
+
+    if dm_dn is not None:
         PS_dn = dm_dn @ ovlp_mat
-        for iorb in iorb_atom1:
-            for jorb in iorb_atom2:
-                mayer_bond_order += (PS[iorb, jorb] * PS[jorb, iorb] + PS_dn[iorb, jorb] * PS_dn[jorb, iorb]).real
+        PS_dn_AB = PS_dn[s1:e1, s2:e2]
+        PS_dn_BA = PS_dn[s2:e2, s1:e1]
+        mayer_bond_order += np.sum(PS_dn_AB * PS_dn_BA.T).real
         mayer_bond_order *= 2
 
     return mayer_bond_order
@@ -239,14 +243,14 @@ def calculate_density_matrix_k(wfc, wg):
     return wfc_weighted @ wfc_weighted.conj().T
 
 
-def cal_mayer_bond_order_between_atom_pair_k(iorb_atom1, iorb_atom2, ovlp_mat, dm):
+def cal_mayer_bond_order_between_atom_pair_k(i, j, atom_orb_ranges, ovlp_mat, dm):
     """Mayer bond order between two atoms at a single k-point."""
-    mayer_bond_order_k = 0
+    s1, e1 = atom_orb_ranges[i]
+    s2, e2 = atom_orb_ranges[j]
     PS = dm @ ovlp_mat
-    for iorb in iorb_atom1:
-        for jorb in iorb_atom2:
-            mayer_bond_order_k += (PS[iorb, jorb] * PS[jorb, iorb]).real
-    return mayer_bond_order_k
+    PS_AB = PS[s1:e1, s2:e2]
+    PS_BA = PS[s2:e2, s1:e1]
+    return np.sum(PS_AB * PS_BA.T).real
 
 
 def read_kpoint_weights(kpoints_file):
@@ -294,13 +298,43 @@ def calculate_minimum_distance(frac1, frac2, cell, max_range=3):
     return np.sqrt(min_dist_sq)
 
 
-def select_atom_pairs(stru, cutoff=None, pairs_str=None):
+def read_pairs_from_file(pairs_file, natoms):
+    """Read atom pairs from a file.
+
+    Args:
+        pairs_file: path to file with atom pairs (1-indexed, space-separated)
+        natoms: total number of atoms for validation
+
+    Returns:
+        list of (i, j) tuples (0-indexed)
+    """
+    pairs = []
+    with open(pairs_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) != 2:
+                raise ValueError(f"Line {line_num} in {pairs_file}: expected 2 atom indices, got {len(parts)}")
+            try:
+                i, j = int(parts[0]) - 1, int(parts[1]) - 1
+            except ValueError:
+                raise ValueError(f"Line {line_num} in {pairs_file}: invalid atom indices '{parts[0]}' '{parts[1]}'")
+            if not (0 <= i < natoms and 0 <= j < natoms):
+                raise ValueError(f"Line {line_num} in {pairs_file}: atom indices out of range: {i + 1}-{j + 1} (natoms={natoms})")
+            pairs.append((min(i, j), max(i, j)))
+    return pairs
+
+
+def select_atom_pairs(stru, cutoff=None, pairs_str=None, pairs_file=None):
     """Select atom pairs to compute Mayer bond order for.
 
     Args:
         stru: AbacusSTRU object with .natoms, .atoms, .coords_direct, .cell
         cutoff: distance cutoff in Angstrom (only pairs within cutoff)
         pairs_str: "i1-j1,i2-j2,..." (1-indexed atom indices)
+        pairs_file: path to file with atom pairs (one pair per line, space-separated, 1-indexed)
 
     Returns:
         list of (i, j) tuples (0-indexed), or None to compute all pairs
@@ -323,6 +357,9 @@ def select_atom_pairs(stru, cutoff=None, pairs_str=None):
             pairs.append((min(i, j), max(i, j)))
         return pairs
 
+    if pairs_file is not None:
+        return read_pairs_from_file(pairs_file, stru.natoms)
+
     if cutoff is not None:
         pairs = []
         for i in range(stru.natoms):
@@ -337,7 +374,7 @@ def select_atom_pairs(stru, cutoff=None, pairs_str=None):
     return None  # no filter → all pairs
 
 
-def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None):
+def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None, pairs_file=None, threshold=None):
     """
     Calculate Mayer bond order from ABACUS calculation output.
     """
@@ -347,12 +384,18 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None):
     from abacustest.lib_prepare.stru import AbacusSTRU
 
     input_params = ReadInput(os.path.join(Path(abacusjob_dir).absolute(), "INPUT"))
+    symmetry = input_params.get("symmetry", 1)
+    if symmetry == 1:
+        print("WARNING: symmetry=1 will result in inaccurate bond orders. Please set symmetry=0 (recommended) or -1.")
     nspin = input_params.get("nspin", 1)
+    if nspin not in [1, 2]:
+        raise ValueError(f"nspin must be 1 or 2 now, got {nspin}")
     gamma_only = input_params.get("gamma_only")
 
     out_mat_hs = input_params.get("out_mat_hs", 1)
     out_mat_hs = out_mat_hs[0] if isinstance(out_mat_hs, list) else out_mat_hs
-    assert out_mat_hs == 1, f"out_mat_hs must be 1, got {out_mat_hs}"
+    if out_mat_hs != 1:
+        raise ValueError(f"out_mat_hs must be 1, got {out_mat_hs}")
 
     suffix = input_params.get('suffix', 'ABACUS')
     out_dir = f"{abacusjob_dir}/OUT.{suffix}"
@@ -379,15 +422,28 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None):
         atom_orb_ranges.append((start, end))
         start = end
 
-    selected_pairs = select_atom_pairs(stru, cutoff, pairs_str)
+    selected_pairs = select_atom_pairs(stru, cutoff, pairs_str, pairs_file)
     if selected_pairs is not None:
         print(f"Selected {len(selected_pairs)} atom pair(s) for computation.")
     else:
         selected_pairs = [(i, j) for i in range(stru.natoms)
                           for j in range(i + 1, stru.natoms)]
 
+    # Determine threshold for output filtering
+    if pairs_str is not None or pairs_file is not None:
+        if threshold is not None:
+            print("Note: --threshold is ignored when using --pairs or --pairs-file")
+        threshold = 0.0
+    else:
+        if threshold is None:
+            threshold = 0.2
+        if threshold <= 0.0:
+            print(f"Warning: threshold={threshold}, all pairs will be printed.")
+
     if gamma_only:
-        assert input_params.get("out_dm", 1) == 1
+        out_dm = input_params.get("out_dm", 1)
+        if out_dm != 1:
+            raise ValueError(f"out_dm must be 1, got {out_dm}")
         ovlp_mat = read_overlap_matrix(f"{out_dir}/data-0-S")
         dm = read_density_matrix(f"{out_dir}/SPIN1_DM")
         if nspin == 2:
@@ -397,11 +453,8 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None):
 
         print("Mayer Bond Order (gamma-only):")
         for i, j in selected_pairs:
-            s1, e1 = atom_orb_ranges[i]
-            s2, e2 = atom_orb_ranges[j]
-            mayer_bond_order = cal_mayer_bond_order_between_atom_pair(
-                list(range(s1, e1)), list(range(s2, e2)), ovlp_mat, dm, dm_dn)
-            if mayer_bond_order > 0.2:
+            mayer_bond_order = cal_mayer_bond_order_between_atom_pair(i, j, atom_orb_ranges, ovlp_mat, dm, dm_dn)
+            if mayer_bond_order > threshold:
                 print(f"  {stru.atoms[i].label}{i + 1} - {stru.atoms[j].label}{j + 1}: {mayer_bond_order:.6f}")
     else:
         wfc_files = sorted(glob.glob(os.path.join(out_dir, "WFC_NAO_K*.txt")))
@@ -429,44 +482,34 @@ def cal_mayer_bond_order(abacusjob_dir, cutoff=None, pairs_str=None):
 
         if is_spin2_multik:
             for ik in range(nk):
-                wfc_up, wg_up = read_wfc_nao_k(
-                    os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt"))
+                wfc_up, wg_up = read_wfc_nao_k(os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt"))
                 dm_up = calculate_density_matrix_k(wfc_up, wg_up)
 
-                wfc_dn, wg_dn = read_wfc_nao_k(
-                    os.path.join(out_dir, f"WFC_NAO_K{ik + 1 + nk}.txt"))
+                wfc_dn, wg_dn = read_wfc_nao_k(os.path.join(out_dir, f"WFC_NAO_K{ik + 1 + nk}.txt"))
                 dm_dn = calculate_density_matrix_k(wfc_dn, wg_dn)
 
                 ovlp_file = os.path.join(out_dir, f"data-{ik}-S")
                 ovlp_mat = read_overlap_matrix(ovlp_file)
 
                 for i, j in selected_pairs:
-                    s1, e1 = atom_orb_ranges[i]
-                    s2, e2 = atom_orb_ranges[j]
-                    bo_up = cal_mayer_bond_order_between_atom_pair_k(
-                        list(range(s1, e1)), list(range(s2, e2)), ovlp_mat, dm_up)
-                    bo_dn = cal_mayer_bond_order_between_atom_pair_k(
-                        list(range(s1, e1)), list(range(s2, e2)), ovlp_mat, dm_dn)
+                    bo_up = cal_mayer_bond_order_between_atom_pair_k(i, j, atom_orb_ranges, ovlp_mat, dm_up)
+                    bo_dn = cal_mayer_bond_order_between_atom_pair_k(i, j, atom_orb_ranges, ovlp_mat, dm_dn)
                     total_bond_order[(i, j)] += 2.0 * (bo_up + bo_dn) / wk[ik]
         else:
             for ik in range(nk):
-                wfc, wg = read_wfc_nao_k(
-                    os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt"))
+                wfc, wg = read_wfc_nao_k(os.path.join(out_dir, f"WFC_NAO_K{ik + 1}.txt"))
                 dm_k = calculate_density_matrix_k(wfc, wg)
 
                 ovlp_file = os.path.join(out_dir, f"data-{ik}-S")
                 ovlp_mat = read_overlap_matrix(ovlp_file)
 
                 for i, j in selected_pairs:
-                    s1, e1 = atom_orb_ranges[i]
-                    s2, e2 = atom_orb_ranges[j]
-                    bo_k = cal_mayer_bond_order_between_atom_pair_k(
-                        list(range(s1, e1)), list(range(s2, e2)), ovlp_mat, dm_k)
+                    bo_k = cal_mayer_bond_order_between_atom_pair_k(i, j, atom_orb_ranges, ovlp_mat, dm_k)
                     total_bond_order[(i, j)] += bo_k / wk[ik]
 
         for i, j in selected_pairs:
             mayer_bond_order = total_bond_order[(i, j)]
-            if mayer_bond_order > 0.2:
+            if mayer_bond_order > threshold:
                 print(f"  {stru.atoms[i].label}{i + 1} - {stru.atoms[j].label}{j + 1}: {mayer_bond_order:.6f}")
 
 if __name__ == '__main__':
@@ -477,11 +520,15 @@ if __name__ == '__main__':
                         help="Only compute pairs within cutoff distance (Angstrom)")
     parser.add_argument("-p", "--pairs", type=str, default=None,
                         help="Atom index pairs (1-indexed), e.g. '1-2,1-3,2-5'")
+    parser.add_argument("--pairs-file", type=str, default=None,
+                        help="File with atom pairs (one pair per line, space-separated, 1-indexed)")
+    parser.add_argument("-t", "--threshold", type=float, default=0.2,
+                        help="Only print pairs with bond order above threshold (default: 0.2, or 0.0 with -p/--pairs-file)")
     args = parser.parse_args()
 
-    if args.cutoff is not None and args.pairs is not None:
-        parser.error("--cutoff and --pairs are mutually exclusive")
+    if sum(x is not None for x in [args.cutoff, args.pairs, args.pairs_file]) > 1:
+        parser.error("--cutoff, --pairs, and --pairs-file are mutually exclusive")
 
     abacusjob_dir = args.abacusjob_dir
     print(f"Calculate Mayer bond order for {abacusjob_dir}")
-    cal_mayer_bond_order(abacusjob_dir, cutoff=args.cutoff, pairs_str=args.pairs)
+    cal_mayer_bond_order(abacusjob_dir, cutoff=args.cutoff, pairs_str=args.pairs, pairs_file=args.pairs_file, threshold=args.threshold)
