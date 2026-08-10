@@ -1,6 +1,8 @@
 """
 Calculate Mayer bond order for ABACUS LCAO calculations.
 Supports both gamma-only and multi-k calculations.
+
+Compatible with ABACUS LTS v3.10.1.
 """
 import os
 from dataclasses import dataclass, field, fields
@@ -239,8 +241,7 @@ def read_wfc_nao_k(file_path):
 
 def calculate_density_matrix_k(wfc, wg):
     """Build density matrix P_k = C_k * diag(wg_k) * C_k^H."""
-    wfc_weighted = wfc * np.sqrt(wg)[np.newaxis, :]
-    return wfc_weighted @ wfc_weighted.conj().T
+    return (wfc * wg[np.newaxis, :]) @ wfc.conj().T
 
 
 def cal_mayer_bond_order_between_atom_pair_k(i, j, atom_orb_ranges, ovlp_mat, dm):
